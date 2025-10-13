@@ -19,7 +19,7 @@ ENV/
 .DS_Store
 
 # Data
-data/
+data/*
 
 # Models
 models/*.joblib
