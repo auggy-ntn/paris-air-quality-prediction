@@ -1,7 +1,44 @@
 [project]
 name = "07-intro-to-time-series"
 version = "0.1.0"
-description = "Add your description here"
+description = "X-HEC MScT Data Science for Business final project for the Introduction to Time Series course"
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "pandas>=2.3.3",
+]
+
+
+# URLs for the project
+[project.urls]
+repository = "https://github.com/auggy-ntn/paris-air-quality-prediction"
+
+# Build system requirements
+[build-system]
+requires = ["setuptools>=65", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*", "models*", "constants*"]
+
+
+###### Configuration for Ruff linter and formatter ######
+[tool.ruff]
+extend-include = ["*.py", "*.ipynb"]
+line-length = 88
+indent-width = 4
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle (errors)
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"

@@ -1,10 +1,34 @@
 # Python-generated files
 __pycache__/
 *.py[oc]
-build/
-dist/
-wheels/
 *.egg-info
 
 # Virtual environments
-.venv
+# Conda
+*.conda
+*.yaml.lock
+
+# Virtual envs
+.venv/
+venv/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
+
+# Data
+data/
+
+# Models
+models/*.joblib
+
+# Logs
+*.log
+
+# Secrets
+.env
+
+# Data files
+*.csv
