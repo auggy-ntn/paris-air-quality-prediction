@@ -2,7 +2,7 @@
 
 This GitHub repository contains the code for the final project of the Introduction to Time Series course from the MScT Data Science and AI for Business at X-HEC.
 
-The objective of this project is to apply time series analysis methods to forecast the quality of the air in Paris from a Kaggle dataset.
+The objective of this project is to apply time series analysis methods to forecast the quality of the air in Paris from a [Kaggle dataset](https://www.kaggle.com/competitions/x-hec-ts-2025-26-predicting-air-quality-in-paris).
 
 ## Repository structure
 ```
