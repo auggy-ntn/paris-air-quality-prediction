@@ -1,5 +1,5 @@
 [project]
-name = "07-intro-to-time-series"
+name = "paris-air-quality-prediction"
 version = "0.1.0"
 description = "X-HEC MScT Data Science for Business final project for the Introduction to Time Series course"
 readme = "README.md"
@@ -7,8 +7,17 @@ requires-python = ">=3.13"
 dependencies = [
     "kaggle>=1.7.4.5",
     "pandas>=2.3.3",
+    "plotly>=6.3.1",
+    "qolmat>=0.1.10",
 ]
 
+[dependency-groups]
+dev = [
+    "anywidget>=0.9.18",
+    "ipykernel>=7.0.0",
+    "jupyterlab>=4.4.9",
+    "pip>=25.2",
+]
 
 # URLs for the project
 [project.urls]
