@@ -33,3 +33,7 @@ COLS = [DATE, NO2, CO, O3, PM10, PM25]
 PREDICTIONS_PATH = DATA_DIR / "predictions"
 PREDICTIONS_COL = "predictions"
 TRUE_VALUES_COL = "true_values"
+
+# Colors for plotting
+COLOR_TRAIN = "#1f77b4"  # Blue
+COLOR_PREDICTION = "#ff7f0e"  # Orange
