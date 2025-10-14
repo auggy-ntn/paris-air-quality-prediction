@@ -11,7 +11,7 @@ def evaluate_models(models: list[str]) -> pd.DataFrame:
     metrics = {"mse": mean_squared_error, "mae": mean_absolute_error}
     res = {model: {} for model in models}
     for model in models:
-        csv = pd.read_csv(cst.PREDICTIONS_PATH / f"{model}.csv")
+        csv = pd.read_csv(cst.PREDICTIONS_PATH / f"predictions_{model}.csv")
         y_pred = csv[cst.PREDICTIONS_COL]
         y_true = csv[cst.TRUE_VALUES_COL]
         for metric in metrics:
