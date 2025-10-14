@@ -13,6 +13,7 @@ dependencies = [
     "prophet>=1.1.7",
     "qolmat>=0.1.10",
     "statsmodels>=0.14.5",
+    "xgboost>=3.0.5",
 ]
 
 [dependency-groups]
