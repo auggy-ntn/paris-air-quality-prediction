@@ -8,7 +8,9 @@ dependencies = [
     "kaggle>=1.7.4.5",
     "matplotlib>=3.10.7",
     "pandas>=2.3.3",
+    "patsy>=1.0.1",
     "plotly>=6.3.1",
+    "prophet>=1.1.7",
     "qolmat>=0.1.10",
     "statsmodels>=0.14.5",
 ]
