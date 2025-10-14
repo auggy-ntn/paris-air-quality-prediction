@@ -11,6 +11,7 @@ Preprocess Paris Air Quality time-series data.
 
 import numpy as np
 import pandas as pd
+from src.utils.additional_data import get_paris_weather
 
 POLLUTANTS = ['valeur_NO2', 'valeur_CO', 'valeur_O3', 'valeur_PM10', 'valeur_PM25']
 
@@ -59,51 +60,62 @@ def _add_lockdown_and_curfew(df: pd.DataFrame) -> pd.DataFrame:
     df['is_curfew_paris'] = curfew.astype(int)
     return df
 
-def preprocess_dataset(input_path: str = "/paris-air-quality-prediction/data/train.csv") -> pd.DataFrame:
+def _preprocess_dates(df, drop=False):
+    df['id'] = pd.to_datetime(df['id'])
+    df.set_index('id', inplace=True)
+    df['hour'] = df.index.hour
+    df['dow'] = df.index.dayofweek
+    df['doy'] = df.index.dayofyear
+    for col, period in [('hour', 24), ('dow', 7), ('doy', 365)]:
+        df[f"{col}_sin"] = np.sin(df[col] * 2 * np.pi / period)
+        df[f"{col}_cos"] = np.cos(df[col] * 2 * np.pi / period)
+        if drop:
+            df.drop(columns=[col], inplace=True)
+    return df
+
+def preprocess_dataset(input_path: str = "/paris-air-quality-prediction/data/train.csv", lags=[], df_weather=None, weather_lags=[]) -> pd.DataFrame:
     """
     Charge le CSV, construit l'index horaire, ajoute les features (dayofweek cyclique, daily means,
     lockdown/curfew, lags 1&2, mean_by_hour) et retourne le DataFrame final.
     """
     df = pd.read_csv(input_path)
+    df = _preprocess_dates(df, drop=False)
+
+    if df_weather is None:
+        start = "2019-01-01"
+        end = "2024-12-31"
+        get_paris_weather(start, end, output_csv="./data/paris_weather.csv")
+        df_weather = pd.read_csv("./data/paris_weather.csv")
+
+    df_weather['time'] = pd.to_datetime(df_weather['time'])
+    df_weather = df_weather.set_index('time').asfreq('H')
 
     # Types de base
-    df['date'] = pd.to_datetime(df['date'], format='%Y-%m-%d', errors='coerce')
-    df['hour'] = df['hour'].astype(int)
-
-    # Index datetime horaire
-    df['datetime'] = df['date'] + pd.to_timedelta(df['hour'], unit='h')
-    df = df.set_index('datetime').sort_index()
-    df = df.asfreq('H')  # insère des NaN pour les heures manquantes
-
-    # Reconstruire date/hour si besoin après asfreq
-    if 'date' not in df.columns or df['date'].isna().any():
-        df['date'] = df.index.normalize()
-    if 'hour' not in df.columns or df['hour'].isna().any():
-        df['hour'] = df.index.hour
-
-    # Encodage cyclique du jour de la semaine
-    df['dayofweek'] = df.index.dayofweek
-    df['dayofweek_sin'] = np.sin(2 * np.pi * df['dayofweek'] / 7)
-    df['dayofweek_cos'] = np.cos(2 * np.pi * df['dayofweek'] / 7)
+    df['date'] = pd.to_datetime(df.index.date, format='%Y-%m-%d', errors='coerce')
 
     # Moyenne par jour calendaire (même valeur pour les 24 lignes du jour)
-    df['date_only'] = df.index.normalize()
-    daily_means = df.groupby('date_only')[POLLUTANTS].transform('mean').add_suffix('_mean_24h')
-    df = pd.concat([df, daily_means], axis=1)
+    # df['date_only'] = df.index.normalize()
+    # daily_means = df.groupby('date_only')[POLLUTANTS].transform('mean').add_suffix('_mean_24h')
+    # df = pd.concat([df, daily_means], axis=1)
 
     # Indicateurs confinement / couvre-feu
     df = _add_lockdown_and_curfew(df)
-
-    # Lags 1h & 2h pour chaque polluant
+    df.drop(columns=['date'], inplace=True)
+    # Lags pour chaque polluant
     for col in POLLUTANTS:
-        df[f'{col}_lag1'] = df[col].shift(1)
-        df[f'{col}_lag2'] = df[col].shift(2)
+        for lag in lags:
+            df[f'{col}_lag{lag}'] = df[col].shift(lag)
+
+    if df_weather is not None:
+        for weather_lag in weather_lags:
+            for col in df_weather.columns:
+                df[f'{col}_lag{weather_lag}'] = df_weather[col].shift(weather_lag)
 
     # Moyenne globale par heure (profil horaire historique)
-    for col in POLLUTANTS:
-        df[f'{col}_mean_by_hour'] = df.groupby('hour')[col].transform('mean')
+    # for col in POLLUTANTS:
+    #     df[f'{col}_mean_by_hour'] = df.groupby('hour')[col].transform('mean')
 
     # Nettoyage colonne helper
-    df = df.drop(columns=['date_only'])
+    # df = df.drop(columns=['date_only'])
 
     return df
