@@ -30,6 +30,10 @@ TARGETS = [NO2, CO, O3, PM10, PM25]
 COLS = [DATE, NO2, CO, O3, PM10, PM25]
 
 # column names in the predictions csv file
-PREDICTIONS_PATH = DATA_DIR / "predictions"
+PREDICTIONS_PATH = PROJECT_ROOT / "output"
 PREDICTIONS_COL = "predictions"
 TRUE_VALUES_COL = "true_values"
+
+# Colors for plotting
+COLOR_TRAIN = "#1f77b4"  # Blue
+COLOR_PREDICTION = "#ff7f0e"  # Orange
