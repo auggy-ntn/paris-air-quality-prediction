@@ -28,3 +28,8 @@ PM25 = "PM25"
 
 TARGETS = [NO2, CO, O3, PM10, PM25]
 COLS = [DATE, NO2, CO, O3, PM10, PM25]
+
+# column names in the predictions csv file
+PREDICTIONS_PATH = DATA_DIR / "predictions"
+PREDICTIONS_COL = "predictions"
+TRUE_VALUES_COL = "true_values"
