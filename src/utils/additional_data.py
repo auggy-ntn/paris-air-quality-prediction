@@ -55,5 +55,5 @@ def get_paris_weather(start_date: str, end_date: str, output_csv: str = "paris_w
 
 if __name__ == "__main__":
     start = "2019-01-01"
-    end = "2024-12-31"
+    end = "2024-09-03"
     get_paris_weather(start, end, output_csv="./data/paris_weather.csv")
