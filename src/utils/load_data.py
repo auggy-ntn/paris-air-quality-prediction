@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import constants.constants as cst
+from src.utils.feature_engineering import preprocess_dataset, add_lags
 
 
 def load_data(data_dir: str = cst.DATA_DIR) -> pd.DataFrame:
@@ -57,3 +58,9 @@ def get_daily_data(df: pd.DataFrame, columns=None):
     if columns:
         df = df[columns]
     return df.resample('D').mean()
+
+def get_complete_training_data(weather_lags, lags):
+    df_train = pd.read_csv("./data/train_imputed_all_columns.csv")
+    df_train = preprocess_dates(df_train)
+    df_train = preprocess_dataset(df_train, weather_lags=weather_lags, lags=lags)
+    return df_train
