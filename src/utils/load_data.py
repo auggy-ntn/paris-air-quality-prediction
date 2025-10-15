@@ -61,6 +61,5 @@ def get_daily_data(df: pd.DataFrame, columns=None):
 
 def get_complete_training_data(weather_lags, lags):
     df_train = pd.read_csv("./data/train_imputed_all_columns.csv")
-    df_train = preprocess_dates(df_train)
     df_train = preprocess_dataset(df_train, weather_lags=weather_lags, lags=lags)
     return df_train

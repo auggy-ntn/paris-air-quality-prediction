@@ -77,11 +77,13 @@ def shift(series, lag):
     """Décale une série temporelle en gérant les NaN."""
     return series.shift(lag)
 
-def load_preprocessed_data(input_path: str = "/paris-air-quality-prediction/data/train.csv", lags=[], df_weather=None, weather_lags=[]) -> pd.DataFrame:
-    df = pd.read_csv(input_path)
-    df = preprocess_dataset(df, df_weather=df_weather, weather_lags=weather_lags)
-    df = add_lags(df, lags)
+def add_lags(df, lags):
+    """Ajoute des features de lag pour chaque polluant."""
+    for col in POLLUTANTS:
+        for lag in lags:
+            df[f'{col}_lag{lag}'] = df[col].shift(lag)
     return df
+
 
 def preprocess_dataset(df, df_weather=None, weather_lags=[], lags=None) -> pd.DataFrame:
     """
@@ -125,11 +127,4 @@ def preprocess_dataset(df, df_weather=None, weather_lags=[], lags=None) -> pd.Da
 
     df.drop(columns=['hour', 'dow', 'doy'], inplace=True)
 
-    return df
-
-def add_lags(df, lags):
-    """Ajoute des features de lag pour chaque polluant."""
-    for col in POLLUTANTS:
-        for lag in lags:
-            df[f'{col}_lag{lag}'] = df[col].shift(lag)
     return df
