@@ -3,9 +3,11 @@ name = "paris-air-quality-prediction"
 version = "0.1.0"
 description = "X-HEC MScT Data Science for Business final project for the Introduction to Time Series course"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.12,<3.13"
 dependencies = [
     "kaggle>=1.7.4.5",
+    "matplotlib>=3.10.7",
+    "numpy>=2.3.3",
     "pandas>=2.3.3",
     "plotly>=6.3.1",
     "qolmat>=0.1.10",
