@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
-# final_pred_lags.py
+# final_pred_lags_2.py
 # Train a lag-enabled TFT and predict next 504 hours with rolling lag updates.
+# Uses feature_engineering.preprocess_dataset() to build future covariates
+# (calendar + weather lag 8760), while pollutant lags are still built here.
 
 import os
 import warnings
@@ -17,6 +19,10 @@ from darts.models import TFTModel
 from darts.utils.likelihood_models import QuantileRegression
 from pytorch_lightning.callbacks import EarlyStopping
 
+# << NEW: pull in your FE pipeline (no pollutant lags; only weather year-lag) >>
+import sys
+sys.path.append('src/utils')
+from feature_engineering import preprocess_dataset
 
 # make float32 the default everywhere
 torch.set_default_dtype(torch.float32)
@@ -25,8 +31,11 @@ torch.set_default_dtype(torch.float32)
 DT_COL = "id"
 TARGETS = ["valeur_CO", "valeur_NO2", "valeur_O3", "valeur_PM10", "valeur_PM25"]
 
-# lags (in hours) to use as past covariates from the targets
+# pollutant lags (in hours) -> built HERE as past_covariates
 LAGS = (1, 24, 168)   # 1h, 1d, 1w
+
+# weather lags (hours) -> built in FE and passed as FUTURE covariates
+WEATHER_LAGS = [8760]  # 365 days * 24 hours
 
 # context / horizon
 INPUT_CHUNK_LEN = 336     # ~2 weeks of history
@@ -43,14 +52,14 @@ USE_GPU = torch.cuda.is_available()
 # I/O
 TRAIN_CSV = "data/train_imputed_all_columns.csv"
 TEST_CSV  = "data/test.csv"
-OUT_PATH  = "submissions/submission_tft_lags_2.csv"
+OUT_PATH  = "submissions/submission_tft_lags_3.csv"
 
 # safety / post-process
 CLIP_NEGATIVES = True
 TIMESTAMP_FMT = "%Y-%m-%d %H"
 
 # ----- Smoothness controls (penalize hour-to-hour jumps) -----
-DELTA_CAP_Q      = 0.90  # cap abs(delta) to 95th percentile of train deltas
+DELTA_CAP_Q      = 0.92  # cap abs(delta) to 95th percentile of train deltas
 DELTA_SHRINK     = 0.50  # multiply predicted deltas by this (0.0..1.0)
 EMA_SMOOTH_ALPHA = 0.20  # blend with last level: new = alpha*last + (1-alpha)*new
 
@@ -65,7 +74,6 @@ def set_repro(seed=SEED):
 def load_data(train_csv: str, test_csv: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
     train_df = pd.read_csv(train_csv)
     test_df  = pd.read_csv(test_csv)
-    # robust time parsing (handles "YYYY-MM-DD HH" and full timestamps)
     train_df[DT_COL] = pd.to_datetime(train_df[DT_COL], errors="raise")
     test_df[DT_COL]  = pd.to_datetime(test_df[DT_COL],  errors="raise")
     train_df = train_df.sort_values(DT_COL).reset_index(drop=True)
@@ -73,86 +81,77 @@ def load_data(train_csv: str, test_csv: str) -> Tuple[pd.DataFrame, pd.DataFrame
     return train_df, test_df
 
 def to_multivar_series(df: pd.DataFrame, cols: Sequence[str]) -> TimeSeries:
-    # ensure continuous hourly index; use lower-case 'h'
     ts = TimeSeries.from_dataframe(
         df, time_col=DT_COL, value_cols=list(cols),
         fill_missing_dates=True, freq="h"
     )
     return ts.astype(np.float32)
 
-def build_future_covs(train_idx: pd.Series,
-                      test_idx: pd.Series) -> Tuple[TimeSeries, TimeSeries]:
+# ---------- FUTURE COVARIATES via your FE (calendar + weather lag 8760) ----------
+def build_future_covs_with_preprocess(train_df: pd.DataFrame,
+                                      test_df: pd.DataFrame) -> Tuple[TimeSeries, TimeSeries]:
     """
-    Build known-future calendar features for train and for a FULL timeline that
-    extends through test end + (OUTPUT_CHUNK_LEN-1) hours so the decoder always
-    has enough future covariates.
+    Build future covariates by calling `preprocess_dataset` on a FULL timeline
+    [train_start .. test_end + (decoder-1)h], adding weather_lag8760 and calendar/lockdown/curfew.
+    No pollutant lags are added here.
     """
-    t_train_min = pd.to_datetime(train_idx.min())
-    t_train_max = pd.to_datetime(train_idx.max())
-    t_test_min  = pd.to_datetime(test_idx.min())
-    t_test_max  = pd.to_datetime(test_idx.max())
+    t_train_min = pd.to_datetime(train_df[DT_COL].min()).floor("h")
+    t_train_max = pd.to_datetime(train_df[DT_COL].max()).ceil("h")
+    t_test_max  = pd.to_datetime(test_df[DT_COL].max()).ceil("h")
 
-    # Full coverage: from earliest train hour to (test end + decoder horizon)
+    # ensure decoder sees enough future
     full_end = t_test_max + pd.Timedelta(hours=OUTPUT_CHUNK_LEN - 1)
-    full_times = pd.date_range(start=t_train_min, end=full_end, freq="h")
-
-    # Train coverage: match train's range
+    full_times  = pd.date_range(start=t_train_min, end=full_end, freq="h")
     train_times = pd.date_range(start=t_train_min, end=t_train_max, freq="h")
 
-    def make_feat(times: pd.DatetimeIndex) -> pd.DataFrame:
-        f = pd.DataFrame({DT_COL: times})
-        f["hour"] = f[DT_COL].dt.hour
-        f["dow"]  = f[DT_COL].dt.dayofweek
-        f["month"]= f[DT_COL].dt.month
-        f["doy"]  = f[DT_COL].dt.dayofyear
-        f["weekend"] = (f["dow"]>=5).astype(np.float32)
+    # build tiny frames with just id to feed FE
+    full_df  = pd.DataFrame({DT_COL: full_times})
+    train_id = pd.DataFrame({DT_COL: train_times})
 
-        # cyclical encodings
-        f["sin_hour"] = np.sin(2*np.pi*f["hour"]/24.0)
-        f["cos_hour"] = np.cos(2*np.pi*f["hour"]/24.0)
-        f["sin_dow"]  = np.sin(2*np.pi*f["dow"]/7.0)
-        f["cos_dow"]  = np.cos(2*np.pi*f["dow"]/7.0)
-        f["sin_doy"]  = np.sin(2*np.pi*f["doy"]/365.25)
-        f["cos_doy"]  = np.cos(2*np.pi*f["doy"]/365.25)
+    # try to reuse cached weather if present; else let FE fetch
+    df_weather = None
+    wcsv = "./data/paris_weather.csv"
+    if os.path.exists(wcsv):
+        try:
+            df_weather = pd.read_csv(wcsv)
+        except Exception:
+            df_weather = None
 
-        return f[[DT_COL,"weekend","sin_hour","cos_hour","sin_dow","cos_dow","sin_doy","cos_doy"]]
+    # FE call: weather_lags only; DO NOT add pollutant lags (lags=None)
+    full_proc = preprocess_dataset(full_df.copy(), df_weather=df_weather,
+                                   weather_lags=WEATHER_LAGS, lags=None)  # :contentReference[oaicite:3]{index=3}
+    # Align index name and slice the training view
+    if full_proc.index.name != DT_COL:
+        full_proc.index.name = DT_COL
+    train_proc = full_proc.loc[train_times[0]:train_times[-1]]
 
-    ft_train_df = make_feat(train_times)
-    ft_full_df  = make_feat(full_times)
+    # Use all engineered columns as future covariates
+    feat_cols = list(full_proc.columns)
 
     ft_train = TimeSeries.from_dataframe(
-        ft_train_df, time_col=DT_COL,
-        value_cols=[c for c in ft_train_df.columns if c!=DT_COL],
+        train_proc.reset_index(), time_col=DT_COL, value_cols=feat_cols,
         fill_missing_dates=True, freq="h"
     ).astype(np.float32)
 
-    ft_all   = TimeSeries.from_dataframe(
-        ft_full_df, time_col=DT_COL,
-        value_cols=[c for c in ft_full_df.columns if c!=DT_COL],
+    ft_all = TimeSeries.from_dataframe(
+        full_proc.reset_index(), time_col=DT_COL, value_cols=feat_cols,
         fill_missing_dates=True, freq="h"
     ).astype(np.float32)
 
     return ft_train, ft_all
 
+# ---------- PAST COVARIATES (pollutant lags) – built here ----------
 def build_target_lag_covs(train_df: pd.DataFrame,
                           targets: Sequence[str],
                           lags: Sequence[int]) -> Tuple[TimeSeries, pd.DataFrame]:
-    """
-    Create lag columns of the targets, return:
-      - past covariate TimeSeries (float32)
-      - aligned DataFrame with the *target columns* trimmed to where lags exist
-    """
     df = train_df[[DT_COL] + list(targets)].copy()
     df = df.sort_values(DT_COL).reset_index(drop=True)
-
     for m in targets:
         for L in lags:
             df[f"{m}_lag{L}"] = df[m].shift(L)
-
     trim = max(lags)
     df_aligned = df.iloc[trim:].reset_index(drop=True)
     lag_cols = [c for c in df_aligned.columns if any(c.endswith(f"_lag{L}") for L in lags)]
-
     pc = TimeSeries.from_dataframe(
         df_aligned, time_col=DT_COL, value_cols=lag_cols,
         fill_missing_dates=True, freq="h"
@@ -166,15 +165,12 @@ def split_train_val(ts: TimeSeries, frac: float) -> Tuple[TimeSeries, TimeSeries
 def compute_delta_caps(df_aligned_targets: pd.DataFrame,
                        targets: Sequence[str],
                        q: float) -> dict:
-    """
-    For each target, compute quantile cap of absolute hourly deltas on the training set.
-    """
     caps = {}
     g = df_aligned_targets.sort_values(DT_COL).reset_index(drop=True)
     for col in targets:
         d = g[col].astype(float).diff().abs().dropna()
         caps[col] = float(d.quantile(q)) if len(d) else np.inf
-    return caps    
+    return caps
 
 @dataclass
 class ScaledData:
@@ -201,9 +197,6 @@ def scale_all(y_all: TimeSeries, pc_train: TimeSeries,
     return ScaledData(y_all_s, y_scaler, pc_train_s, pc_scaler, ft_train_s, ft_all_s, ft_scaler)
 
 def make_model_first_stage() -> TFTModel:
-    """
-    First-stage model: has validation, so monitor val_loss.
-    """
     return TFTModel(
         input_chunk_length=INPUT_CHUNK_LEN,
         output_chunk_length=OUTPUT_CHUNK_LEN,
@@ -230,9 +223,6 @@ def make_model_first_stage() -> TFTModel:
     )
 
 def make_model_finetune() -> TFTModel:
-    """
-    Second-stage model: no validation set provided; monitor train_loss to avoid Lightning error.
-    """
     return TFTModel(
         input_chunk_length=INPUT_CHUNK_LEN,
         output_chunk_length=OUTPUT_CHUNK_LEN,
@@ -258,7 +248,7 @@ def make_model_finetune() -> TFTModel:
         ),
     )
 
-# -------- Lag window builder for prediction --------
+# -------- Build rolling PC window from buffer (unchanged) --------
 def _build_pc_window_from_buffer(
     buf_idxed: pd.DataFrame,
     end_time: pd.Timestamp,
@@ -266,31 +256,19 @@ def _build_pc_window_from_buffer(
     lags: Sequence[int],
     window_len: int,
 ) -> TimeSeries:
-    """
-    Build a past_covariates window TimeSeries covering
-    [end_time - window_len + 1 hour, end_time] at hourly freq,
-    with columns = {target}_lag{L}. Values come from buf_idxed[target].loc[t - Lh].
-
-    NOTE: For TFT, we pass window_len = INPUT_CHUNK_LEN + 1 to satisfy
-    the 'start <= t_next - INPUT_CHUNK_LEN' requirement.
-    """
     times = pd.date_range(end=end_time, periods=window_len, freq="h")
     lag_cols = [f"{m}_lag{L}" for m in targets for L in lags]
     arr = np.empty((window_len, len(lag_cols)), dtype=np.float32)
-
     col_i = 0
     for m in targets:
-        series_m = buf_idxed[m]  # Series indexed by hourly timestamps (continuous)
+        series_m = buf_idxed[m]
         for L in lags:
             src_times = times - pd.to_timedelta(L, unit="h")
-            # pull values, ffill if any gaps
             vals = series_m.reindex(src_times).ffill()
             if vals.isna().any():
-                # fallback to last known value (shouldn't usually happen)
                 vals = vals.fillna(series_m.iloc[-1])
             arr[:, col_i] = vals.values.astype(np.float32)
             col_i += 1
-
     pc_window = TimeSeries.from_times_and_values(times=times, values=arr, columns=lag_cols)
     return pc_window.astype(np.float32)
 
@@ -304,20 +282,17 @@ def rolling_predict_with_lags(
     targets: Sequence[str],
     lags: Sequence[int],
     steps: int,
-    delta_caps: dict,                 # NEW: per-target delta cap
+    delta_caps: dict,
     delta_shrink: float = DELTA_SHRINK,
     ema_alpha: float = EMA_SMOOTH_ALPHA,
 ) -> TimeSeries:
     preds: List[TimeSeries] = []
-
-    # time-indexed buffer for fast lag lookups
     buf_idxed = work_df_unscaled.set_index(DT_COL).sort_index()
 
     for _ in range(steps):
         t_next = buf_idxed.index[-1] + pd.Timedelta(hours=1)
-
-        # past window ends at encoder end (t_next - 1h)
         enc_end = t_next - pd.Timedelta(hours=1)
+
         pc_window = _build_pc_window_from_buffer(
             buf_idxed=buf_idxed,
             end_time=enc_end,
@@ -327,12 +302,10 @@ def rolling_predict_with_lags(
         ).astype(np.float32)
         pc_window_s = pc_scaler.transform(pc_window).astype(np.float32)
 
-        # future covariates must span from window start through decoder horizon
         window_start = pc_window.start_time()
         dec_end = t_next + pd.Timedelta(hours=OUTPUT_CHUNK_LEN - 1)
         ft_window_s = ft_all_s.slice(window_start, dec_end).astype(np.float32)
 
-        # predict one step (levels)
         yhat_s = model.predict(
             n=1,
             series=y_hist_s,
@@ -340,58 +313,36 @@ def rolling_predict_with_lags(
             future_covariates=ft_window_s,
             verbose=False,
         )
-        # unscale to level space
         yhat_lvl = y_scaler.inverse_transform(yhat_s)
 
-        # ----- delta penalty / smoothing -----
-        prev_lvl = buf_idxed.iloc[-1][targets].astype(float).values  # last known levels
-        raw_pred = yhat_lvl.values(copy=False)[0]                     # predicted levels
+        prev_lvl = buf_idxed.iloc[-1][targets].astype(float).values
+        raw_pred = yhat_lvl.values(copy=False)[0]
+        delta = delta_shrink * (raw_pred - prev_lvl)
 
-        # compute delta
-        delta = raw_pred - prev_lvl
-
-        # shrink toward zero
-        delta = delta_shrink * delta
-
-        # cap magnitude per target
         for i, col in enumerate(targets):
             cap = delta_caps.get(col, np.inf)
-            if np.isfinite(cap):
-                if abs(delta[i]) > cap:
-                    delta[i] = np.sign(delta[i]) * cap
+            if np.isfinite(cap) and abs(delta[i]) > cap:
+                delta[i] = np.sign(delta[i]) * cap
 
-        # new level after penalty
         penalized = prev_lvl + delta
-
-        # EMA smoothing with last value (stabilizes)
         smoothed = ema_alpha * prev_lvl + (1.0 - ema_alpha) * penalized
 
-        # build a 1-step TimeSeries from smoothed levels (still in level space)
         yhat_lvl_smoothed = TimeSeries.from_times_and_values(
             times=pd.date_range(start=t_next, periods=1, freq="h"),
-            values=smoothed.reshape(1, -1).astype(np.float32),   # << enforce float32 here
+            values=smoothed.reshape(1, -1).astype(np.float32),
             columns=targets,
         )
-
-        # keep for submission (level space)
         preds.append(yhat_lvl_smoothed)
 
-        # update unscaled buffer with smoothed levels
-        new_row = pd.DataFrame({m: float(v) for m, v in zip(targets, smoothed)},
-                               index=[t_next])
-        buf_idxed = pd.concat([buf_idxed, new_row])
+        buf_idxed = pd.concat([buf_idxed, pd.DataFrame({m: float(v) for m, v in zip(targets, smoothed)}, index=[t_next])])
+        y_hist_s = y_hist_s.concatenate(y_scaler.transform(yhat_lvl_smoothed).astype(np.float32))
 
-        # update scaled history with *scaled* smoothed levels
-        yhat_lvl_smoothed_s = y_scaler.transform(yhat_lvl_smoothed).astype(np.float32)
-        y_hist_s = y_hist_s.concatenate(yhat_lvl_smoothed_s)
-
-    # concatenate predictions in level space
     pred_ts = preds[0]
     for p in preds[1:]:
         pred_ts = pred_ts.concatenate(p)
     return pred_ts
 
-
+# ======================= MAIN =======================
 def main():
     set_repro()
 
@@ -399,17 +350,17 @@ def main():
     train_df, test_df = load_data(TRAIN_CSV, TEST_CSV)
     print(f"✅ Data loaded: train={len(train_df)} rows, test={len(test_df)} rows")
 
-    # ---------- Build future covariates (calendar) ----------
-    print("🔄 Building future covariates...")
-    ft_train, ft_all = build_future_covs(train_df[DT_COL], test_df[DT_COL])
+    # ---------- Build future covariates via FE (calendar + weather lag 8760) ----------
+    print("🔄 Building future covariates (FE + weather_lag8760)…")
+    ft_train, ft_all = build_future_covs_with_preprocess(train_df, test_df)
     print("✅ Future covariates ready")
 
-    # ---------- Build past covariates from target lags ----------
-    print(f"🔄 Building lagged past covariates {LAGS}...")
+    # ---------- Build past covariates from pollutant lags (here) ----------
+    print(f"🔄 Building lagged past covariates {LAGS}…")
     pc_train, aligned_targets_df = build_target_lag_covs(train_df, TARGETS, LAGS)
     print("✅ Past covariates built and targets aligned")
 
-    # ---------- Build target series aligned with lagged covariates ----------
+    # ---------- Target series aligned with past covariates ----------
     y_all = to_multivar_series(aligned_targets_df, TARGETS)
 
     # ---------- Scale everything ----------
@@ -451,12 +402,9 @@ def main():
     # ---------- Second-stage fine-tuning on full aligned history ----------
     print("🧠 Fine-tuning on full aligned history (stage 2)…")
     model_stage2 = make_model_finetune()
-    # transfer weights from stage 1 -> stage 2
     try:
-        # Preferred if available in your Darts version
         model_stage2.load_weights(model_stage1)
     except Exception:
-        # Fallback to raw torch state dict if needed
         try:
             model_stage2.model.load_state_dict(model_stage1.model.state_dict())
         except Exception:
@@ -469,8 +417,7 @@ def main():
         verbose=True,
     )
 
-    # ---------- Rolling forecast with lag updates ----------
-    # ----- set smoothness caps from training deltas -----
+    # ---------- Caps from training deltas ----------
     delta_caps = compute_delta_caps(aligned_targets_df, TARGETS, q=DELTA_CAP_Q)
     print("🧯 Delta caps (abs/hour):", delta_caps)
 
@@ -487,28 +434,21 @@ def main():
         targets=TARGETS,
         lags=LAGS,
         steps=FORECAST_STEPS,
-        delta_caps=delta_caps,                 # NEW
-        delta_shrink=DELTA_SHRINK,            # NEW (optional override)
-        ema_alpha=EMA_SMOOTH_ALPHA,           # NEW (optional override)
+        delta_caps=delta_caps,
+        delta_shrink=DELTA_SHRINK,
+        ema_alpha=EMA_SMOOTH_ALPHA,
     )
 
-
     # ---------- Build submission ----------
-    # --- build submission (replace your current pred_df/sub merge block) ---
     print("🧾 Building submission…")
+    pred_df = yhat_test.to_dataframe()  # index = timestamps
 
-    # yhat_test is a Darts TimeSeries; this returns a pandas DataFrame with a DatetimeIndex
-    pred_df = yhat_test.to_dataframe()  # columns = TARGETS, index = timestamps
-
-    # Merge test ids with predictions by matching the timestamp index
     sub = test_df[[DT_COL]].merge(pred_df, left_on=DT_COL, right_index=True, how="left")
 
-    # Clip negatives if requested
     if CLIP_NEGATIVES:
         for col in TARGETS:
             sub[col] = sub[col].astype(float).clip(lower=0.0)
 
-    # Format timestamp
     sub[DT_COL] = pd.to_datetime(sub[DT_COL]).dt.strftime(TIMESTAMP_FMT)
 
     os.makedirs(os.path.dirname(OUT_PATH), exist_ok=True)
